@@ -538,3 +538,165 @@ func (s *simulator) calcNextStakeDiffProposal7() int64 {
 	}
 	return nextDiff
 }
+
+// Algo 8 by raedah
+// The goal of this algorithm is to remove oscillations from ticket price.
+func (s *simulator) calcNextStakeDiffProposal8() int64 {
+	// Stake difficulty before any tickets could possibly be purchased is
+	// the minimum value.
+	nextHeight := int32(0)
+	if s.tip != nil {
+		nextHeight = s.tip.height + 1
+	}
+	stakeDiffStartHeight := int32(s.params.CoinbaseMaturity) + 1
+	if nextHeight < stakeDiffStartHeight {
+		return s.params.MinimumStakeDiff
+	}
+
+	// Return the previous block's difficulty requirements if the next block
+	// is not at a difficulty retarget interval.
+	intervalSize := s.params.StakeDiffWindowSize
+	curDiff := s.tip.ticketPrice
+	if int64(nextHeight)%intervalSize != 0 {
+		return curDiff
+	}
+
+	// Attempt to get the pool size from the previous retarget interval.
+	var prevPoolSize int64
+	prevRetargetHeight := nextHeight - int32(intervalSize)
+	node := s.ancestorNode(s.tip, prevRetargetHeight, nil)
+	if node != nil {
+		prevPoolSize = int64(node.poolSize)
+	}
+
+	// Get the immature ticket count from the previous interval.
+	var prevImmatureTickets int64
+	ticketMaturity := int64(s.params.TicketMaturity)
+	s.ancestorNode(node, node.height-int32(ticketMaturity), func(n *blockNode) {
+		prevImmatureTickets += int64(len(n.ticketsAdded))
+	})
+
+	// Return the existing ticket price for the first interval.
+	if prevPoolSize+prevImmatureTickets == 0 {
+		return curDiff
+	}
+
+	immatureTickets := int64(len(s.immatureTickets))
+	curPoolSize := int64(s.tip.poolSize)
+	curPoolSizeAll := curPoolSize + immatureTickets
+	prevPoolSizeAll := prevPoolSize + prevImmatureTickets
+	poolSizeChangeRatio := float64(curPoolSizeAll) / float64(prevPoolSizeAll)
+	ticketsPerBlock := int64(s.params.TicketsPerBlock)
+	ticketPoolSize := int64(s.params.TicketPoolSize)
+	targetPoolSizeAll := ticketsPerBlock * (ticketPoolSize + ticketMaturity) // responsive, less expires
+	//targetPoolSizeAll := (ticketsPerBlock * ticketPoolSize) + immatureTickets // smooth
+	targetRatio := float64(curPoolSizeAll) / float64(targetPoolSizeAll)
+
+	targetBalancer := 1.0
+	relativeBalancer := 1.0
+	if curPoolSizeAll < prevPoolSizeAll { // trending down
+		if targetRatio > 1.0 { // above target, right direction, continue
+			relativeBalancer = poolSizeChangeRatio // lower price
+		}
+		if targetRatio < 1.0 { // below target, wrong direction, reverse
+			targetBalancer = targetRatio // lower price
+		}
+	}
+	if curPoolSizeAll > prevPoolSizeAll { // trending up
+		if targetRatio < 1.0 { // below target, right direction, continue
+			relativeBalancer = poolSizeChangeRatio // raise price
+		}
+		if targetRatio > 1.0 { // above target, wrong direction, reverse
+			targetBalancer = targetRatio // raise price
+		}
+	}
+
+	// Voila!
+	nextDiff := float64(curDiff) * relativeBalancer * targetBalancer
+
+	// Upper bound on price. Insures the pool gets fully populated during price rises.
+	maximumStakeDiff := (float64(s.tip.totalSupply) / float64(targetPoolSizeAll)) * targetRatio
+	if nextDiff > maximumStakeDiff {
+		nextDiff = maximumStakeDiff
+	}
+
+	// Lower bound on price. Prevents price bounce.
+	weightedIdealDiff := (float64(s.tip.stakedCoins) / float64(targetPoolSizeAll)) * targetRatio
+	if nextDiff < weightedIdealDiff {
+		nextDiff = weightedIdealDiff
+	}
+
+	// Hard coded minimum value.
+	if int64(nextDiff) < s.params.MinimumStakeDiff {
+		return s.params.MinimumStakeDiff
+	}
+
+	return int64(nextDiff)
+}
+
+// Algo 9 by raedah
+// This algorithm has the interesting property that it does not base its
+// calculations on the previous diff. Rather, it calculates anew each run.
+// This creates the smoothest ticket price adjustments,
+// with a trade off of a less stable ticket pool size. Expiries increase 1%.
+// Perhaps the accuracy can still be solved.
+func (s *simulator) calcNextStakeDiffProposal9() int64 {
+	// Stake difficulty before any tickets could possibly be purchased is
+	// the minimum value.
+	nextHeight := int32(0)
+	if s.tip != nil {
+		nextHeight = s.tip.height + 1
+	}
+	stakeDiffStartHeight := int32(s.params.CoinbaseMaturity) + 1
+	if nextHeight < stakeDiffStartHeight {
+		return s.params.MinimumStakeDiff
+	}
+
+	// Return the previous block's difficulty requirements if the next block
+	// is not at a difficulty retarget interval.
+	intervalSize := s.params.StakeDiffWindowSize
+	curDiff := s.tip.ticketPrice
+	if int64(nextHeight)%intervalSize != 0 {
+		return curDiff
+	}
+
+	// Attempt to get the pool size from the previous retarget interval.
+	var prevPoolSize int64
+	prevRetargetHeight := nextHeight - int32(intervalSize)
+	node := s.ancestorNode(s.tip, prevRetargetHeight, nil)
+	if node != nil {
+		prevPoolSize = int64(node.poolSize)
+	}
+
+	// Get the immature ticket count from the previous interval.
+	var prevImmatureTickets int64
+	ticketMaturity := int64(s.params.TicketMaturity)
+	s.ancestorNode(node, node.height-int32(ticketMaturity), func(n *blockNode) {
+		prevImmatureTickets += int64(len(n.ticketsAdded))
+	})
+
+	// Return the existing ticket price for the first interval.
+	if prevPoolSize+prevImmatureTickets == 0 {
+		return curDiff
+	}
+
+	immatureTickets := int64(len(s.immatureTickets))
+	//curPoolSize := int64(s.tip.poolSize)
+	//curPoolSizeAll := curPoolSize + immatureTickets
+	//targetRatio := float64(curPoolSizeAll) / float64(targetPoolSizeAll)
+	ticketsPerBlock := int64(s.params.TicketsPerBlock)
+	ticketPoolSize := int64(s.params.TicketPoolSize)
+	targetPoolSizeAll := (ticketsPerBlock * ticketPoolSize) + immatureTickets
+
+	// Voila!
+	idealPrice := float64(s.tip.stakedCoins) / float64(targetPoolSizeAll)
+	nextDiff := idealPrice
+	//nextDiff := idealPrice * targetRatio //more responsive, less smooth
+
+	// Hard coded minimum value.
+	if int64(nextDiff) < s.params.MinimumStakeDiff {
+		return s.params.MinimumStakeDiff
+	}
+
+	return int64(nextDiff)
+}
